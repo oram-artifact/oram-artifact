@@ -1,0 +1,68 @@
+name: check-artifact
+
+# Untar the committed artifact tarball and verify every proof inside the
+# official EasyCrypt container image. This runs the container directly (the
+# command `make docker-check` would run) so that no TTY is allocated and the
+# logs stay readable in CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Parallel EasyCrypt jobs (1 is the safe setting; higher risks spurious SMT timeouts)"
+        required: false
+        default: "2"
+
+env:
+  ARCHIVE: oram-security.tar.gz
+  # Extracted top-level directory inside the tarball.
+  WORKDIR: oram-security
+  # Kept in sync with the artifact's Makefile (DOCKER_IMAGE).
+  DOCKER_IMAGE: ghcr.io/easycrypt/ec-test-box:r2026.03
+
+jobs:
+  docker-check:
+    runs-on: ubuntu-latest
+    # The container runs amd64 natively here (no emulation), but proofs can
+    # still be slow; give it generous headroom.
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Extract artifact tarball
+        run: |
+          test -f "$ARCHIVE"
+          tar xzf "$ARCHIVE"
+          test -f "$WORKDIR/tests.config"
+
+      - name: Check proofs in EasyCrypt container
+        # Same invocation as the Makefile's `docker-check` target, but without
+        # `-t` so no pseudo-TTY is allocated and the logs stay readable in CI.
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$PWD":/work -w /work \
+            "$DOCKER_IMAGE" \
+            opam exec -- easycrypt runtest \
+              -jobs "${{ github.event.inputs.jobs || '2' }}" \
+              -report report.log tests.config all
+
+      - name: Publish report to run summary
+        # Render report.log inline on the run's Summary page so a reviewer can
+        # read the pass/fail result without downloading the artifact.
+        if: always()
+        working-directory: ${{ env.WORKDIR }}
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/report-summary.py" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload proof report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: report.log
+          path: ${{ env.WORKDIR }}/report.log
+          if-no-files-found: warn
